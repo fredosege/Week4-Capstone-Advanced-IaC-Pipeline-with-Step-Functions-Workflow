@@ -1,0 +1,558 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Capstone Project: Advanced IaC with Step Functions, Lambda, and SSM Parameter Store'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Project Configuration"
+        Parameters:
+          - ProjectName
+          - Environment
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: AdvancedIaC
+    Description: Name of the project for resource naming
+  
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - test
+      - prod
+    Description: Deployment environment
+
+  GitHubOwner:
+    Type: String
+    Default: Edensel
+    Description: GitHub repository owner
+
+  GitHubRepo:
+    Type: String
+    Default: Advanced-IaC-Pipeline-with-Step-Functions-Workflow
+    Description: GitHub repository name
+
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: GitHub branch to monitor
+
+  GitHubOAuthToken:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /github/oauth-token
+    Description: OAuth token for GitHub access (stored in SSM)
+
+Resources:
+  # ============================================
+  # 1. SSM PARAMETER STORE
+  # ============================================
+  GreetingParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /app/config/greeting
+      Type: String
+      Value: '🎉 Welcome to Advanced IaC Pipeline! Successfully retrieved from SSM Parameter Store!'
+      Description: 'Greeting message used by Lambda workflow'
+      Tags:
+        Project: !Ref ProjectName
+        Environment: !Ref Environment
+
+  # ============================================
+  # 2. LAMBDA EXECUTION ROLE
+  # ============================================
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SSMParameterAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/app/config/greeting'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================
+  # 3. LAMBDA FUNCTION
+  # ============================================
+  GreetingLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-GreetingLambda-${Environment}"
+      Description: 'Lambda function that retrieves greeting from SSM Parameter Store'
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk');
+          const ssm = new AWS.SSM();
+          
+          exports.handler = async (event) => {
+              try {
+                  console.log('Lambda invoked at:', new Date().toISOString());
+                  console.log('Event received:', JSON.stringify(event, null, 2));
+                  
+                  const params = {
+                      Name: '/app/config/greeting',
+                      WithDecryption: false
+                  };
+                  
+                  console.log('Fetching parameter from SSM Parameter Store...');
+                  const result = await ssm.getParameter(params).promise();
+                  const greeting = result.Parameter.Value;
+                  
+                  console.log('SUCCESS: Retrieved from SSM:', greeting);
+                  
+                  const inputMessage = event.message || 'No additional message provided';
+                  
+                  return {
+                      statusCode: 200,
+                      status: "Success",
+                      greeting: greeting,
+                      inputMessage: inputMessage,
+                      timestamp: new Date().toISOString(),
+                      ssmParameter: '/app/config/greeting'
+                  };
+                  
+              } catch (error) {
+                  console.error('❌ ERROR:', error.message);
+                  console.error('Full error:', JSON.stringify(error, null, 2));
+                  throw new Error(`Failed to retrieve SSM parameter: ${error.message}`);
+              }
+          };
+      Timeout: 30
+      MemorySize: 128
+      TracingConfig:
+        Mode: Active
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================
+  # 4. STEP FUNCTIONS EXECUTION ROLE
+  # ============================================
+  StepFunctionsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaInvocation
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt GreetingLambdaFunction.Arn
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:PutLogEvents
+                Resource: '*'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ============================================
+  # 5. STEP FUNCTIONS STATE MACHINE
+  # ============================================
+  GreetingStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "${ProjectName}-GreetingWorkflow-${Environment}"
+      DefinitionString: !Sub |
+        {
+          "Comment": "Serverless workflow orchestrating Lambda tasks with SSM integration",
+          "StartAt": "Initialize Workflow",
+          "States": {
+            "Initialize Workflow": {
+              "Type": "Pass",
+              "Comment": "Initializes the workflow with metadata",
+              "Parameters": {
+                "message": "Step Function execution started",
+                "startTime.$": "$$.State.EnteredTime",
+                "executionId.$": "$$.Execution.Id"
+              },
+              "Next": "Wait for Processing"
+            },
+            "Wait for Processing": {
+              "Type": "Wait",
+              "Comment": "Simulate processing delay for demonstration",
+              "Seconds": 2,
+              "Next": "Invoke Greeting Lambda"
+            },
+            "Invoke Greeting Lambda": {
+              "Type": "Task",
+              "Comment": "Invokes Lambda to retrieve SSM greeting parameter",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${GreetingLambdaFunction}",
+                "Payload": {
+                  "message.$": "$.message",
+                  "source": "StepFunctions"
+                }
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException"],
+                  "IntervalSeconds": 1,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "Workflow Failed",
+                  "ResultPath": "$.error"
+                }
+              ],
+              "ResultPath": "$.lambdaResult",
+              "Next": "Workflow Completed"
+            },
+            "Workflow Completed": {
+              "Type": "Pass",
+              "Comment": "Workflow completed successfully",
+              "End": true
+            },
+            "Workflow Failed": {
+              "Type": "Fail",
+              "Comment": "Workflow failed due to Lambda error",
+              "Cause": "Lambda function execution failed"
+            }
+          }
+        }
+      RoleArn: !GetAtt StepFunctionsExecutionRole.Arn
+      TracingConfig:
+        Enabled: true
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StateMachineLogGroup.Arn
+
+  # ============================================
+  # 6. CLOUDWATCH LOG GROUP FOR STEP FUNCTIONS
+  # ============================================
+  StateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/stepfunctions/${ProjectName}-GreetingWorkflow-${Environment}"
+      RetentionInDays: 7
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ============================================
+  # 7. CLOUDWATCH DASHBOARD
+  # ============================================
+  MonitoringDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${ProjectName}-Monitoring-${Environment}"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "text",
+              "properties": {
+                "markdown": "# Capstone Project Monitoring\\n\\n**Project:** ${ProjectName}\\n**Environment:** ${Environment}\\n**Deployed:** ${AWS::StackId}"
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", "FunctionName", "${GreetingLambdaFunction}"]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "Lambda Invocations"
+              }
+            }
+          ]
+        }
+
+  # ============================================
+  # 8. CI/CD PIPELINE - ARTIFACT BUCKET
+  # ============================================
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-artifacts-${Environment}-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ============================================
+  # 9. CI/CD PIPELINE - CODEBUILD PROJECT
+  # ============================================
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${ProjectName}-Build-${Environment}"
+      Description: Build project for IaC deployment
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        EnvironmentVariables:
+          - Name: STACK_NAME
+            Value: !Ref AWS::StackName
+          - Name: TEMPLATE_FILE
+            Value: template.yaml
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - echo Installing dependencies...
+            build:
+              commands:
+                - echo Validating CloudFormation template...
+                - aws cloudformation validate-template --template-body file://template.yaml
+                - echo Build completed successfully
+          artifacts:
+            files:
+              - template.yaml
+              - lambda/**
+
+  # ============================================
+  # 10. CI/CD PIPELINE - CODEPIPELINE
+  # ============================================
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub "${ProjectName}-Pipeline-${Environment}"
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              Configuration:
+                Owner: !Ref GitHubOwner
+                Repo: !Ref GitHubRepo
+                Branch: !Ref GitHubBranch
+                OAuthToken: !Ref GitHubOAuthToken
+              OutputArtifacts:
+                - Name: SourceArtifact
+        - Name: Build
+          Actions:
+            - Name: BuildAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              InputArtifacts:
+                - Name: SourceArtifact
+              OutputArtifacts:
+                - Name: BuildArtifact
+        - Name: Deploy
+          Actions:
+            - Name: DeployAction
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: 1
+                Provider: CloudFormation
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                StackName: !Ref AWS::StackName
+                TemplatePath: BuildArtifact::template.yaml
+                Capabilities: CAPABILITY_IAM
+                ParameterOverrides: |
+                  {
+                    "ProjectName": "${ProjectName}",
+                    "Environment": "${Environment}",
+                    "GitHubOwner": "${GitHubOwner}",
+                    "GitHubRepo": "${GitHubRepo}",
+                    "GitHubBranch": "${GitHubBranch}"
+                  }
+              InputArtifacts:
+                - Name: BuildArtifact
+
+  # ============================================
+  # 11. IAM ROLES FOR CI/CD
+  # ============================================
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodeBuildDeveloperAccess
+      Policies:
+        - PolicyName: CloudFormationAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:ValidateTemplate
+                  - cloudformation:DescribeStacks
+                Resource: '*'
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodePipeline_FullAccess
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+                  - s3:PutObject
+                Resource:
+                  - !Sub "arn:aws:s3:::${ArtifactBucket}"
+                  - !Sub "arn:aws:s3:::${ArtifactBucket}/*"
+        - PolicyName: CodeBuildAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                Resource: !GetAtt CodeBuildProject.Arn
+        - PolicyName: CloudFormationDeploy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DeleteStack
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:ExecuteChangeSet
+                Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+# ============================================
+# OUTPUTS
+# ============================================
+Outputs:
+  SSMParameterName:
+    Description: 'SSM Parameter Store name'
+    Value: /app/config/greeting
+    Export:
+      Name: !Sub "${AWS::StackName}-SSMParameter"
+
+  SSMParameterValue:
+    Description: 'SSM Parameter value (for verification)'
+    Value: !GetAtt GreetingParameter.Value
+
+  LambdaFunctionName:
+    Description: 'Lambda function name'
+    Value: !Ref GreetingLambdaFunction
+    Export:
+      Name: !Sub "${AWS::StackName}-Lambda"
+
+  LambdaFunctionArn:
+    Description: 'Lambda function ARN'
+    Value: !GetAtt GreetingLambdaFunction.Arn
+
+  StateMachineName:
+    Description: 'Step Functions state machine name'
+    Value: !Ref GreetingStateMachine
+    Export:
+      Name: !Sub "${AWS::StackName}-StateMachine"
+
+  StateMachineArn:
+    Description: 'Step Functions state machine ARN'
+    Value: !Ref GreetingStateMachine
+
+  CloudWatchDashboardUrl:
+    Description: 'CloudWatch Dashboard URL'
+    Value: !Sub "https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ProjectName}-Monitoring-${Environment}"
+
+  CodePipelineName:
+    Description: 'CI/CD Pipeline name'
+    Value: !Ref CodePipeline
+    Export:
+      Name: !Sub "${AWS::StackName}-Pipeline"
+
+  CodePipelineUrl:
+    Description: 'CodePipeline Console URL'
+    Value: !Sub "https://console.aws.amazon.com/codesuite/codepipeline/pipelines/${CodePipeline}/view"
+
+  ArtifactBucketName:
+    Description: 'S3 bucket for pipeline artifacts'
+    Value: !Ref ArtifactBucket
